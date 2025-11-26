@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: llm-quiz-bot
+    env: docker
+    plan: standard-1  # change to starter/free or larger depending on need
+    branch: main
+    buildCommand: ""  # using Dockerfile; leave empty
+    startCommand: ""  # Dockerfile CMD used
+    dockerfilePath: Dockerfile
+    autoDeploy: true
+    envVars:
+      - key: SECRET
+        sync: false
+        # DON'T put value here; set in Render dashboard
+      - key: AI_PIPE_KEY
+        sync: false
+      - key: MODEL
+        sync: false
+      - key: API_URL
+        sync: false
+      - key: QUIZ_EMAIL
+        sync: false
+    healthCheckPath: /  # you may want to add a /health endpoint

@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+httpx
+playwright
+pandas
+pdfplumber
+python-multipart
+pydantic
+matplotlib
+openpyxl
+python-dotenv
