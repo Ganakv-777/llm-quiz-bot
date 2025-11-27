@@ -23,7 +23,6 @@ import matplotlib.pyplot as plt
 # --------------------------------------------------------
 load_dotenv()
 
-# Environment config
 EXPECTED_SECRET = os.getenv("SECRET") or "gkv"
 AI_PIPE_KEY = os.getenv("AI_PIPE_KEY")
 MODEL = os.getenv("MODEL") or "gpt-5-nano"
@@ -31,14 +30,12 @@ API_URL = os.getenv("API_URL")
 QUIZ_EMAIL = os.getenv("QUIZ_EMAIL") or "your-email@domain.com"
 
 USER_AGENT = "LLM-Quiz-Bot/1.0"
-
-# Time budget per incoming request (seconds). Must be < 180 (3 minutes).
 TOTAL_TIME_BUDGET = 170
-
 
 app = FastAPI()
 
-class QuizRequest(BaseModel):
+# Request Body Model
+class QuizPayload(BaseModel):
     email: str
     secret: str
     url: str
@@ -47,21 +44,7 @@ class QuizRequest(BaseModel):
 def home():
     return "working"
 
-@app.post("/quiz")
-def solve_quiz(data: QuizRequest):
-    return {
-        "email": data.email,
-        "secret": data.secret,
-        "url": data.url,
-        "status": "Received"
-    }
-
-class QuizPayload(BaseModel):
-    email: str
-    secret: str
-    url: str
-
-# ------------------ helpers (same as before) ------------------
+# ------------------ helpers ------------------
 
 async def render_page(url: str, timeout_ms: int = 60_000):
     async with async_playwright() as pw:
@@ -73,12 +56,13 @@ async def render_page(url: str, timeout_ms: int = 60_000):
             await page.wait_for_load_state("networkidle", timeout=timeout_ms)
         except PWTimeoutError:
             pass
+
         html = await page.content()
         try:
             text = await page.inner_text("body")
         except:
             text = ""
-        # links
+
         anchors = await page.query_selector_all("a")
         links = []
         for a in anchors:
@@ -88,14 +72,14 @@ async def render_page(url: str, timeout_ms: int = 60_000):
                     links.append(href)
             except:
                 pass
-        # pre tags
+
         pres = []
         for p in await page.query_selector_all("pre"):
             try:
                 pres.append(await p.inner_text())
             except:
                 pass
-        # form actions
+
         form_actions = []
         for f in await page.query_selector_all("form"):
             try:
@@ -104,6 +88,7 @@ async def render_page(url: str, timeout_ms: int = 60_000):
                     form_actions.append(act)
             except:
                 pass
+
         await browser.close()
         return {"html": html, "text": text, "links": links, "pres": pres, "form_actions": form_actions}
 
@@ -178,7 +163,6 @@ async def post_json(url: str, payload: Dict[str,Any]):
         except:
             return {"status_code": r.status_code, "text": r.text}
 
-# Optional: AI Pipe call (unused by default)
 async def call_ai_pipe(prompt: str):
     if not AI_PIPE_KEY or not API_URL:
         raise RuntimeError("AI_PIPE_KEY or API_URL not set in environment")
@@ -189,18 +173,14 @@ async def call_ai_pipe(prompt: str):
         data = r.json()
         return data["choices"][0]["message"]["content"]
 
-# ------------------ core solver flow (follows next-URLs) ------------------
+# ------------------ main solver loop ------------------
 
 async def solve_quiz_flow(start_url: str, email: str, secret: str, time_budget: float):
-    """
-    Follow quiz pages starting from start_url until no next URL or time runs out.
-    Returns a trace list describing each step.
-    """
     trace = []
     deadline = time.monotonic() + time_budget
     current_url = start_url
     visited = 0
-    MAX_VISITS = 40  # safety cap to avoid infinite loops
+    MAX_VISITS = 40
 
     while current_url and time.monotonic() < deadline and visited < MAX_VISITS:
         visited += 1
@@ -209,12 +189,12 @@ async def solve_quiz_flow(start_url: str, email: str, secret: str, time_budget: 
         try:
             render = await render_page(current_url)
             step["actions"].append("rendered")
-            # attempt to find candidate json and submit_url
+
             candidate = extract_json_from_texts(render.get("pres", []) + [render.get("text","")])
             submit_url = None
             if candidate:
                 submit_url = candidate.get("submit") or candidate.get("submit_url") or candidate.get("submitUrl")
-            # form actions and links
+
             for f in render.get("form_actions", []):
                 if f and "http" in f:
                     submit_url = submit_url or f
@@ -222,64 +202,66 @@ async def solve_quiz_flow(start_url: str, email: str, secret: str, time_budget: 
                 if l and ("submit" in l.lower() or "answer" in l.lower() or "post" in l.lower()):
                     if l.startswith("http"):
                         submit_url = submit_url or l
-            # fallback regex search in text for direct submit endpoint
+
             if not submit_url:
                 m = re.search(r"https?://[^\s'\"<>]+", render.get("text",""))
                 if m:
-                    # prefer URLs that contain 'submit' but fallback to first
                     cand = m.group(0)
-                    if "submit" in cand.lower():
-                        submit_url = cand
-                    else:
-                        submit_url = submit_url or cand
+                    submit_url = cand
 
             step["submit_url"] = submit_url
             step["actions"].append("discovered_submit")
 
-            # Try to find data file to download and compute answer
             tmpdir = tempfile.mkdtemp()
             downloaded = []
             download_url = None
+
             if candidate:
                 for key in ["file","download","url","data_url"]:
                     if key in candidate and isinstance(candidate[key], str) and candidate[key].startswith("http"):
-                        download_url = candidate[key]; break
+                        download_url = candidate[key]
+                        break
+
             if not download_url:
                 for l in render.get("links", []):
                     if l and any(ext in l.lower() for ext in [".pdf",".csv",".json"]):
                         if l.startswith("http"):
-                            download_url = l; break
+                            download_url = l
+                            break
+
             if download_url:
                 p = download_file(download_url, tmpdir)
                 if p:
-                    downloaded.append(p); step["actions"].append(f"downloaded:{os.path.basename(p)}")
+                    downloaded.append(p)
+                    step["actions"].append(f"downloaded:{os.path.basename(p)}")
 
-            # compute answer using heuristics
             answer = None
             for path in downloaded:
                 if path.lower().endswith(".pdf"):
                     s = parse_pdf_sum(path)
                     if s is not None:
-                        answer = s; break
+                        answer = s
+                        break
                 if path.lower().endswith(".csv") and answer is None:
                     s = parse_csv_sum(path)
                     if s is not None:
-                        answer = s; break
+                        answer = s
+                        break
                 if path.lower().endswith(".json") and answer is None:
                     try:
                         with open(path) as f:
                             j = json.load(f)
                         if isinstance(j, list):
                             vals = [float(x.get("value",0)) for x in j if isinstance(x, dict)]
-                            answer = sum(vals); break
+                            answer = sum(vals)
+                            break
                     except:
                         pass
 
-            # candidate-provided answer fallback
             if answer is None and candidate and "answer" in candidate:
-                answer = candidate["answer"]; step["actions"].append("used_candidate_answer")
+                answer = candidate["answer"]
+                step["actions"].append("used_candidate_answer")
 
-            # simple text table -> plot fallback
             if answer is None:
                 rows = []
                 for ln in render.get("text","").splitlines():
@@ -294,7 +276,6 @@ async def solve_quiz_flow(start_url: str, email: str, secret: str, time_budget: 
                     answer = make_plot_base64(df, "x", "y")
                     step["actions"].append("generated_plot")
 
-            # final safety: if nothing, use a generic string (demo accepts arbitrary)
             if answer is None:
                 answer = "anything you want"
                 step["actions"].append("fallback_answer_used")
@@ -303,7 +284,6 @@ async def solve_quiz_flow(start_url: str, email: str, secret: str, time_budget: 
                 answer if isinstance(answer, (str, int, float)) else "binary_or_large_payload"
             )
 
-            # Post answer (with limited retries per URL)
             submission_result = None
             if submit_url:
                 attempts = 0
@@ -316,46 +296,38 @@ async def solve_quiz_flow(start_url: str, email: str, secret: str, time_budget: 
                         submission_result = await post_json(submit_url, payload)
                         step["actions"].append("posted")
                         step["submission_result"] = submission_result
-                        # break loop if correct True returned explicitly
+
                         if isinstance(submission_result, dict) and submission_result.get("correct") is True:
                             break
-                        # else if response provides a next url, break to follow it
+
                         if isinstance(submission_result, dict) and submission_result.get("url"):
                             break
+
                     except Exception as e:
                         step["actions"].append(f"post_error:{str(e)[:200]}")
                         await asyncio.sleep(0.5)
-                # end attempts
-            else:
-                step["actions"].append("no_submit_url_found")
 
             step["end_time"] = time.time()
             trace.append(step)
 
-            # decide next url
             next_url = None
             if isinstance(submission_result, dict):
-                # primary: server returns {"url": "..."}
                 next_url = submission_result.get("url")
-                # some systems nest in other keys; check common places
                 if not next_url:
-                    # check message-like reason fields for urls
                     reason = submission_result.get("reason") or ""
                     m = re.search(r"https?://[^\s'\"<>]+", str(reason))
                     if m:
                         next_url = m.group(0)
-            # fallback: sometimes the page itself contains a follow-up link
+
             if not next_url:
                 for l in render.get("links", []):
                     if l and "quiz" in l and l.startswith("http"):
-                        next_url = l; break
+                        next_url = l
+                        break
 
-            # if next_url present -> continue loop, else finish
             if next_url:
                 current_url = next_url
-                # continue to next iteration
             else:
-                # no further url -> finish
                 break
 
         except Exception as e:
@@ -364,14 +336,12 @@ async def solve_quiz_flow(start_url: str, email: str, secret: str, time_budget: 
             trace.append(step)
             break
 
-    # finished loop
     return {"trace": trace, "time_left": max(0, deadline - time.monotonic())}
 
-# ------------------ FastAPI endpoint that uses the loop ------------------
+# ------------------ QUIZ ENDPOINT ------------------
 
 @app.post("/quiz")
 async def quiz_endpoint(request: Request):
-    # Validate request body
     try:
         body = await request.json()
     except:
@@ -382,11 +352,9 @@ async def quiz_endpoint(request: Request):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Bad fields: {e}")
 
-    # Check secret
     if payload.secret != EXPECTED_SECRET:
         raise HTTPException(status_code=403, detail="Invalid secret")
 
-    # Start solving flow — keep within TOTAL_TIME_BUDGET
     start_time = time.monotonic()
     try:
         result = await solve_quiz_flow(payload.url, payload.email, payload.secret, TOTAL_TIME_BUDGET)
