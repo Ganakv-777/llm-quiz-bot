@@ -8,6 +8,7 @@ import asyncio
 from typing import Any, Dict
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -16,47 +17,63 @@ from playwright.async_api import async_playwright, TimeoutError as PWTimeoutErro
 import pandas as pd
 import pdfplumber
 import matplotlib.pyplot as plt
-
+import uvicorn
 
 # ============================================================
 # Load environment variables
 # ============================================================
 load_dotenv()
 
+# keep your env variable names exactly
 EXPECTED_SECRET = os.getenv("SECRET") or "gkv"
 AI_PIPE_KEY = os.getenv("AI_PIPE_KEY")
 API_URL = os.getenv("API_URL")
 MODEL = os.getenv("MODEL") or "gpt-5-nano"
 
 USER_AGENT = "LLM-Quiz-Bot/1.0"
-TOTAL_TIME_BUDGET = 170   # < 180 sec for Railway
-
+TOTAL_TIME_BUDGET = int(os.getenv("TOTAL_TIME_BUDGET") or 170)   # < 180 sec for Railway
 
 # ============================================================
 # FastAPI application
 # ============================================================
 app = FastAPI(title="LLM Quiz Bot", version="1.0.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # change to specific domains in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+START_TIME = time.time()
 
 
 # ============================================================
-# Request Body for /quiz
+# Request Body for /solve
 # ============================================================
-class QuizPayload(BaseModel):
+class SolvePayload(BaseModel):
     email: str
     secret: str
     url: str
 
 
 # ============================================================
-# Home endpoint
+# Home & health endpoints
 # ============================================================
 @app.get("/")
 def home():
-    return "working"
+    return {"status": "working"}
+
+
+@app.get("/healthz")
+def healthz():
+    """Simple liveness check."""
+    return {"status": "ok", "uptime_seconds": int(time.time() - START_TIME)}
 
 
 # ============================================================
 # Helper: Render page using Playwright
+# (unchanged from your original)
 # ============================================================
 async def render_page(url: str, timeout_ms: int = 60_000):
     async with async_playwright() as pw:
@@ -223,6 +240,7 @@ async def call_ai_pipe(prompt: str):
 
 # ============================================================
 # MAIN: Solve quiz step-by-step
+# (unchanged)
 # ============================================================
 async def solve_quiz_flow(start_url: str, email: str, secret: str, time_budget: float):
     trace = []
@@ -346,15 +364,29 @@ async def solve_quiz_flow(start_url: str, email: str, secret: str, time_budget: 
 
 
 # ============================================================
-# FINAL API ENDPOINT — THIS is the correct one
+# FINAL API ENDPOINT — /solve (direct execution)
 # ============================================================
-@app.post("/quiz")
-async def quiz_endpoint(payload: QuizPayload):
+@app.post("/solve")
+async def solve_endpoint(payload: SolvePayload):
+    # validate secret
     if payload.secret != EXPECTED_SECRET:
         raise HTTPException(status_code=403, detail="Invalid secret")
 
     start = time.monotonic()
-    result = await solve_quiz_flow(payload.url, payload.email, payload.secret, TOTAL_TIME_BUDGET)
+    try:
+        result = await solve_quiz_flow(payload.url, payload.email, payload.secret, TOTAL_TIME_BUDGET)
+    except Exception as e:
+        # return an internal error with some details for debugging
+        raise HTTPException(status_code=500, detail=f"Solver failed: {str(e)}")
+
     result["total_elapsed_seconds"] = time.monotonic() - start
     result["status"] = "completed"
     return result
+
+
+# ============================================================
+# Run the app
+# ============================================================
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 8080))   # default to 8080
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
