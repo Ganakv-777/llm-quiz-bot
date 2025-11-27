@@ -9,3 +9,4 @@ pydantic
 matplotlib
 openpyxl
 python-dotenv
+requests
