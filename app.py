@@ -35,16 +35,26 @@ USER_AGENT = "LLM-Quiz-Bot/1.0"
 # Time budget per incoming request (seconds). Must be < 180 (3 minutes).
 TOTAL_TIME_BUDGET = 170
 
+
 app = FastAPI()
 
 class QuizRequest(BaseModel):
     email: str
     secret: str
     url: str
-    
+
 @app.get("/")
 def home():
-    return {"status": "ok"}
+    return "working"
+
+@app.post("/quiz")
+def solve_quiz(data: QuizRequest):
+    return {
+        "email": data.email,
+        "secret": data.secret,
+        "url": data.url,
+        "status": "Received"
+    }
 
 class QuizPayload(BaseModel):
     email: str
