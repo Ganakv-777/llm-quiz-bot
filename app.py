@@ -36,6 +36,9 @@ USER_AGENT = "LLM-Quiz-Bot/1.0"
 TOTAL_TIME_BUDGET = 170
 
 app = FastAPI()
+@app.get("/")
+def home():
+    return {"status": "ok"}
 
 class QuizPayload(BaseModel):
     email: str
